@@ -1,0 +1,191 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git zip unzip \
+            autoconf libtool pkg-config \
+            libncurses5-dev libssl-dev libffi-dev \
+            zlib1g-dev libsqlite3-dev ccache libltdl-dev \
+            nasm yasm
+
+      - name: Install Android SDK
+        run: |
+          SDK=$HOME/.buildozer/android/platform/android-sdk
+          mkdir -p $SDK/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d $SDK/cmdline-tools
+          mv $SDK/cmdline-tools/cmdline-tools $SDK/cmdline-tools/latest
+          mkdir -p $SDK/tools/bin
+          ln -sf $SDK/cmdline-tools/latest/bin/sdkmanager $SDK/tools/bin/sdkmanager
+          ln -sf $SDK/cmdline-tools/latest/bin/avdmanager $SDK/tools/bin/avdmanager
+          echo "ANDROIDSDK=$SDK" >> $GITHUB_ENV
+          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$SDK/platform-tools"           >> $GITHUB_PATH
+
+      - name: Install Android build-tools
+        run: |
+          SM=$HOME/.buildozer/android/platform/android-sdk/cmdline-tools/latest/bin/sdkmanager
+          yes | $SM --licenses 2>/dev/null || true
+          $SM "platform-tools" "build-tools;33.0.2" "platforms;android-33"
+
+      - name: Install Buildozer and Cython
+        run: |
+          pip install --upgrade pip
+          pip install buildozer==1.5.0 cython==0.29.37
+
+      - name: Cache NDK only
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer/android/platform/android-ndk-r25b
+          key: ndk-r25b-${{ runner.os }}-v1
+
+      - name: Download NDK if not cached
+        run: |
+          NDK=$HOME/.buildozer/android/platform/android-ndk-r25b
+          if [ ! -d "$NDK" ]; then
+            echo "Downloading NDK r25b..."
+            mkdir -p $HOME/.buildozer/android/platform
+            wget -q https://dl.google.com/android/repository/android-ndk-r25b-linux.zip -O /tmp/ndk.zip
+            unzip -q /tmp/ndk.zip -d $HOME/.buildozer/android/platform
+          else
+            echo "NDK cached — skipping download"
+          fi
+
+      - name: Wipe old build artifacts (force full recompile)
+        run: |
+          rm -rf .buildozer
+          echo "Wiped .buildozer — full fresh build"
+
+      - name: Build APK
+        run: |
+          export ANDROIDSDK=$HOME/.buildozer/android/platform/android-sdk
+          export ANDROIDNDK=$HOME/.buildozer/android/platform/android-ndk-r25b
+          export ANDROIDAPI=33
+          export ANDROIDMINAPI=26
+          buildozer -v android debug 2>&1 | tee build.log
+          echo "── bin/ contents ──"
+          ls -lh bin/ 2>/dev/null || echo "(empty)"
+
+      # ── DEPENDENCY AUDIT — shows exactly what got built into the APK ──
+      - name: Audit APK contents
+        if: always()
+        run: |
+          APK=$(find bin/ -name "*.apk" 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "No APK found"
+          else
+            echo "APK size: $(du -h $APK | cut -f1)"
+            echo ""
+            echo "=== Unpacking APK to inspect contents ==="
+            mkdir -p /tmp/apk_inspect
+            cp "$APK" /tmp/apk_inspect/app.zip
+            cd /tmp/apk_inspect
+            unzip -q app.zip
+
+            echo ""
+            echo "=== Python packages installed in APK ==="
+            find . -name "*.egg-info" -o -name "*.dist-info" 2>/dev/null | \
+              sed 's|.*/||' | sort | tee /tmp/installed_packages.txt
+
+            echo ""
+            echo "=== Key binaries (ffmpeg, python, etc) ==="
+            find . -type f \( -name "ffmpeg" -o -name "python" -o -name "python3" \
+              -o -name "libpython*" -o -name "libffmpeg*" \) 2>/dev/null | sort
+
+            echo ""
+            echo "=== yt_dlp presence ==="
+            find . -path "*/yt_dlp*" -name "*.py" 2>/dev/null | head -5 && \
+              echo "yt-dlp: FOUND" || echo "yt-dlp: MISSING"
+
+            echo ""
+            echo "=== ffpyplayer presence ==="
+            find . -path "*/ffpyplayer*" 2>/dev/null | head -5 && \
+              echo "ffpyplayer: FOUND" || echo "ffpyplayer: MISSING"
+
+            echo ""
+            echo "=== certifi presence ==="
+            find . -path "*/certifi*" 2>/dev/null | head -3 && \
+              echo "certifi: FOUND" || echo "certifi: MISSING"
+
+            echo ""
+            echo "=== Top 20 largest files in APK ==="
+            find . -type f -exec du -h {} + 2>/dev/null | sort -rh | head -20
+
+            echo ""
+            echo "=== AndroidManifest.xml permissions ==="
+            cat AndroidManifest.xml 2>/dev/null | grep -i "permission" || echo "manifest not found at root"
+          fi
+
+      # ── Upload full build.log as artifact so you can always read it ───
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 30
+
+      - name: Find APK
+        id: find_apk
+        run: |
+          APK=$(find bin/ -name "*.apk" 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "BUILD FAILED — last 120 lines:"
+            tail -120 build.log
+            exit 1
+          fi
+          echo "APK: $APK ($(du -h $APK | cut -f1))"
+          echo "apk_path=$APK"             >> $GITHUB_OUTPUT
+          echo "apk_name=$(basename $APK)" >> $GITHUB_OUTPUT
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytdownloader-apk
+          path: ${{ steps.find_apk.outputs.apk_path }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: "YT Downloader v${{ github.run_number }}"
+          body: |
+            ## YT Downloader APK
+            Built from `${{ github.sha }}`
+            APK size: check artifacts for exact size
+
+            ### Install
+            1. Download `.apk` below
+            2. Send to phone and open
+            3. Allow install from unknown sources if prompted
+          files: ${{ steps.find_apk.outputs.apk_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
