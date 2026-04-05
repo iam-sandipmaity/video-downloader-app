@@ -4,7 +4,11 @@ Persistent app settings for Video Downloader.
 
 import json
 import os
+import threading
 import time
+
+# In-process lock prevents two saves from interleaving (TOCTOU protection).
+_lock = threading.Lock()
 
 APP_VERSION = "1.0"
 DEFAULT_THEME = "Neon Dusk"
@@ -14,13 +18,24 @@ DEFAULT_HISTORY_LIMIT = 120
 DEFAULT_DIAGNOSTICS_LIVE = True
 
 
-def _external_base():
+def get_data_dir():
+    """Single canonical source for the app's data directory.
+
+    Returns the ``Download/videodownloader`` folder on Android, falling back
+    to the user's home directory on desktop.  Every module should import this
+    instead of duplicating the android-storage lookup.
+    """
     try:
         from android.storage import primary_external_storage_path
+
         root = primary_external_storage_path()
     except Exception:
         root = os.path.expanduser("~")
     return os.path.join(root, "Download", "videodownloader")
+
+
+def _external_base():
+    return get_data_dir()
 
 
 def default_download_dir():
@@ -76,14 +91,15 @@ def load_settings():
 
 
 def save_settings(data):
-    merged = _defaults()
-    if isinstance(data, dict):
-        merged.update(data)
-    p = settings_path()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
-    return merged
+    with _lock:
+        merged = _defaults()
+        if isinstance(data, dict):
+            merged.update(data)
+        p = settings_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        return merged
 
 
 def load_history():
@@ -104,12 +120,32 @@ def load_history():
 
 
 def save_history(items):
-    p = history_path()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    payload = items if isinstance(items, list) else []
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    return payload
+    with _lock:
+        p = history_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        payload = items if isinstance(items, list) else []
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return payload
+
+
+def update_settings(updates):
+    """Batch-update multiple settings in a single load->save cycle.
+
+    Args:
+        updates: dict of setting_key -> new_value
+
+    This avoids the TOCTOU gap that individual set_* functions have
+    when called in rapid succession.
+    """
+    with _lock:
+        current = load_settings()
+        current.update(updates)
+        p = settings_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(current, f, ensure_ascii=False, indent=2)
+        return current
 
 
 def _mk_hist_id():

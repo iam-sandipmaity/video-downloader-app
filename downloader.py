@@ -31,13 +31,43 @@ except ImportError:
     yt_dlp = None
     _YT_DLP_AVAILABLE = False
 
+# ── yt-dlp version guard ──────────────────────────────────────────────────
+_YT_DLP_MIN_VERSION = "2024.01.01"
+
+
+def _check_yt_dlp_version():
+    """Warn in the crash log if yt-dlp is older than the tested minimum."""
+    if not _YT_DLP_AVAILABLE or yt_dlp is None:
+        return
+    current = getattr(yt_dlp, "__version__", "unknown")
+    if current == "unknown":
+        return
+    try:
+        from packaging.version import parse as _pv
+        if _pv(current) < _pv(_YT_DLP_MIN_VERSION):
+            log(
+                f"[yt-dlp] WARNING: installed version {current} is older "
+                f"than minimum {_YT_DLP_MIN_VERSION}. Upgrading is recommended."
+            )
+    except Exception:
+        # Fall back to a simple string comparison if packaging is absent
+        if current < _YT_DLP_MIN_VERSION:
+            log(f"[yt-dlp] WARNING: version {current} may be outdated")
+
+
+_check_yt_dlp_version()
+
 # ── Storage / Logging ─────────────────────────────────────────────────────
 def _base():
-    try:
-        from android.storage import primary_external_storage_path
-        b = os.path.join(primary_external_storage_path(), "Download", "videodownloader")
-    except ImportError:
-        b = os.path.join(os.path.expanduser("~"), "Downloads", "videodownloader")
+    if app_settings and hasattr(app_settings, "get_data_dir"):
+        b = app_settings.get_data_dir()
+    else:
+        try:
+            from android.storage import primary_external_storage_path
+
+            b = os.path.join(primary_external_storage_path(), "Download", "videodownloader")
+        except ImportError:
+            b = os.path.join(os.path.expanduser("~"), "Downloads", "videodownloader")
     os.makedirs(b, exist_ok=True)
     return b
 
@@ -57,7 +87,9 @@ def _max_log_bytes():
 
 def _append_line_capped(path, line, max_bytes):
     try:
-        if os.path.exists(path):
+        line_bytes = line.encode("utf-8", errors="ignore")
+        needs_check = os.path.exists(path)
+        if needs_check:
             sz = os.path.getsize(path)
             if sz > max_bytes:
                 keep = max_bytes // 2
@@ -67,8 +99,8 @@ def _append_line_capped(path, line, max_bytes):
                 with open(path, "wb") as wf:
                     wf.write(b"...log truncated...\n")
                     wf.write(tail)
-        with open(path, "a", encoding="utf-8", errors="ignore") as af:
-            af.write(line + "\n")
+        with open(path, "ab") as af:
+            af.write(line_bytes + b"\n")
     except Exception:
         pass
 

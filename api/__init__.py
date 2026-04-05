@@ -73,19 +73,23 @@ def get_platforms_requiring_cookies():
 def get_cookie_file_path(platform_name):
     """
     Get the expected cookie file path for a platform.
-    
+
     Args:
         platform_name: Platform identifier
-        
+
     Returns:
         str: Path to cookie file or None if not found
     """
     try:
-        from android.storage import primary_external_storage_path
-        base = os.path.join(primary_external_storage_path(), "Download", "videodownloader")
-    except ImportError:
-        base = os.path.join(os.path.expanduser("~"), "Downloads", "videodownloader")
-    
+        import app_settings
+        base = app_settings.get_data_dir()
+    except Exception:
+        try:
+            from android.storage import primary_external_storage_path
+            base = os.path.join(primary_external_storage_path(), "Download", "videodownloader")
+        except ImportError:
+            base = os.path.join(os.path.expanduser("~"), "Downloads", "videodownloader")
+
     os.makedirs(base, exist_ok=True)
     
     # Try platform-specific cookie file first

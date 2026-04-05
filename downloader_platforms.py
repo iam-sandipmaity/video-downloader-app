@@ -390,3 +390,58 @@ def download(url, fmt_info=None, on_progress=None, on_done=None, on_error=None,
         friendly_error = platform_config.parse_error(err_msg)
         if on_error:
             on_error(friendly_error)
+
+
+def download_batch(url_list, fmt_info=None, on_progress=None, on_done=None,
+                   on_error=None, on_batch_done=None, control=None,
+                   on_state=None, on_net=None):
+    """Download a list of URLs sequentially.
+
+    on_batch_done(completed, failed, total) is called once at the end, where
+    *completed* and *failed* are lists of result dicts with keys:
+    {"url", "path"/"error"}.
+    """
+    completed = []
+    failed = []
+    total = len(url_list)
+
+    for idx, url in enumerate(url_list, 1):
+        if hasattr(control, "is_cancelled") and control.is_cancelled():
+            break
+
+        done = {"url": url}
+        error_holder = {"error": None}
+
+        def _on_done(path):
+            done["path"] = path
+
+        def _on_err(msg):
+            error_holder["error"] = msg
+
+        def _on_prog(pct, spd, eta, state, total_txt):
+            if on_progress:
+                label = f"[{idx}/{total}] {pct:.0f}% — {urlparse(url).netloc}"
+                on_progress(pct, spd, eta, label, total_txt)
+
+        download(
+            url=url,
+            fmt_info=fmt_info,
+            on_progress=_on_prog,
+            on_done=_on_done,
+            on_error=_on_err,
+            control=control,
+            on_state=on_state,
+            on_net=on_net,
+        )
+
+        if error_holder["error"]:
+            done["error"] = error_holder["error"]
+            failed.append(done)
+        elif "path" in done:
+            completed.append(done)
+        else:
+            done["error"] = "Unknown failure"
+            failed.append(done)
+
+    if on_batch_done:
+        on_batch_done(completed, failed, total)

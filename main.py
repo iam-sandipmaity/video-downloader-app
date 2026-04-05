@@ -17,12 +17,25 @@ NOTIF_ACTION_PAUSE  = "com.local.videodownloader.action.PAUSE"
 NOTIF_ACTION_RESUME = "com.local.videodownloader.action.RESUME"
 NOTIF_ACTION_STOP   = "com.local.videodownloader.action.STOP"
 
-def _logpath():
+def _get_data_dir():
+    """Use app_settings.get_data_dir() when available, otherwise fall back."""
+    cfg = globals().get("app_settings", None)
+    if cfg and hasattr(cfg, "get_data_dir"):
+        try:
+            return cfg.get_data_dir()
+        except Exception:
+            pass
     try:
         from android.storage import primary_external_storage_path
+
         b = os.path.join(primary_external_storage_path(), "Download", "videodownloader")
     except ImportError:
         b = os.path.join(os.path.expanduser("~"), "Downloads", "videodownloader")
+    return b
+
+
+def _logpath():
+    b = _get_data_dir()
     os.makedirs(b, exist_ok=True)
     return os.path.join(b, "crash.log")
 
@@ -696,6 +709,7 @@ class VideoDownloaderApp(App):
         self._settings.setdefault("theme_mode", "dark")
         self._logs     = []
         self._history  = []
+        self._batch_urls = []  # remaining URLs for batch download
         self._cur_tab  = "download"
         self._settings_dir_input = None
         self._notif_btn = None
@@ -1311,6 +1325,8 @@ class VideoDownloaderApp(App):
                 except Exception as e:
                     wlog(f"startup cleanup failed: {e}")
             threading.Thread(target=_bg_cleanup, daemon=True).start()
+        # Check clipboard for URL
+        Clock.schedule_once(lambda dt: self._check_clipboard_on_startup(), 1.2)
 
     def on_pause(self):
         # Keep Python process alive while app is backgrounded if Android allows it.
@@ -1899,11 +1915,7 @@ class VideoDownloaderApp(App):
                 return app_settings.default_download_dir()
             except Exception as e:
                 wlog(f"default dir fallback: {e}")
-        try:
-            from android.storage import primary_external_storage_path
-            return os.path.join(primary_external_storage_path(), "Download", "videodownloader")
-        except Exception:
-            return os.path.join(os.path.expanduser("~"), "Downloads", "videodownloader")
+        return _get_data_dir()
 
     def _normalize_history_entry(self, item):
         if not isinstance(item, dict):
@@ -2480,6 +2492,113 @@ class VideoDownloaderApp(App):
         self._history_limit_input.text = str(hist_limit)
         self._set_settings_status("Performance settings saved", "33ed9a")
 
+    def _import_cookie_file(self):
+        """Let the user pick a cookies.txt file from the filesystem."""
+        try:
+            from android.storage import primary_external_storage_path
+            start = os.path.join(primary_external_storage_path(), "Download")
+        except ImportError:
+            start = os.path.expanduser("~")
+
+        self._cookie_picker_shown = False
+        popup = None
+
+        chooser = FileChooserListView(
+            path=start, filters=["*.txt"],
+            dirselect=False, multiselect=False,
+        )
+
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(12))
+        box.add_widget(lbl("Select cookies.txt", 12, TEXT, bold=True, h=26))
+        box.add_widget(chooser)
+
+        row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(10))
+
+        def _cancel(*_):
+            popup.dismiss()
+
+        def _pick(*_):
+            sel = chooser.selection
+            if not sel:
+                return
+            path = sel[0]
+            popup.dismiss()
+            self._install_cookie_file(path)
+
+        cancel_btn = OutlineBtn(text="Cancel", size_hint=(0.3, 1), font_size=sp(12))
+        cancel_btn.bind(on_release=_cancel)
+        pick_btn = Btn(text="Install", size_hint=(0.7, 1), font_size=sp(12))
+        pick_btn.bind(on_release=_pick)
+        row.add_widget(cancel_btn)
+        row.add_widget(pick_btn)
+        box.add_widget(row)
+
+        popup = Popup(
+            title="Cookie File", title_color=list(TEXT),
+            title_size=sp(14),
+            content=box,
+            size_hint=(0.9, 0.7),
+            background_color=list(CARD),
+            separator_color=list(BORDER),
+        )
+        popup.open()
+
+    def _install_cookie_file(self, src_path):
+        """Copy a cookies.txt file into the app's data directory."""
+        try:
+            base = app_settings.get_data_dir()
+            os.makedirs(base, exist_ok=True)
+            fname = os.path.basename(src_path)
+            dest = os.path.join(base, fname)
+            import shutil
+            shutil.copy2(src_path, dest)
+            size = os.path.getsize(dest)
+            wlog(f"Cookie installed: {fname} ({size} bytes)")
+            lbl_ref = getattr(self, "_cookie_status_lbl", None)
+            if lbl_ref:
+                lbl_ref.text = f"[color=33ed9a]{fname} installed ({size // 1024} KB)[/color]"
+        except Exception as e:
+            wlog(f"Cookie install failed: {e}")
+            lbl_ref = getattr(self, "_cookie_status_lbl", None)
+            if lbl_ref:
+                lbl_ref.text = f"[color=ff4488]Failed: {e}[/color]"
+
+    def _show_cookie_help(self):
+        """Show a popup explaining how to export browser cookies."""
+        box = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(18))
+        help_text = (
+            "[b]How to export cookies:[/b]\n\n"
+            "1. Install the [b]Get cookies.txt[/b] browser extension\n"
+            "   (Chrome / Firefox / Edge)\n\n"
+            "2. Log in to the platform (Instagram, Facebook, etc.)\n\n"
+            "3. Click the extension icon → Export\n"
+            "   This downloads a cookies.txt file\n\n"
+            "4. Use IMPORT COOKIE FILE to install it\n\n"
+            "Files are stored in:\n"
+            "[color=00ccf2]Download/videodownloader/[/color]\n\n"
+            "Or copy manually:\n"
+            "[color=00ccf2]platform_cookies.txt[/color]"
+        )
+        box.add_widget(Label(
+            text=help_text, markup=True, color=list(TEXT),
+            font_size=sp(11), halign="left",
+        ))
+        row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(10))
+        ok_btn = Btn(text="Got it", font_size=sp(12))
+        ok_btn.bind(on_release=lambda *_: popup.dismiss())
+        row.add_widget(ok_btn)
+        box.add_widget(row)
+
+        popup = Popup(
+            title="Cookie Setup", title_color=list(TEXT),
+            title_size=sp(14),
+            content=box,
+            size_hint=(0.9, 0.6),
+            background_color=list(CARD),
+            separator_color=list(BORDER),
+        )
+        popup.open()
+
     def _clear_crash_log(self):
         try:
             p = _logpath()
@@ -3009,6 +3128,30 @@ class VideoDownloaderApp(App):
         perf_card.add_widget(self._storage_lbl)
         c.add_widget(perf_card)
 
+        # ── Cookie Import Card ────────────────────────────────────────────
+        cookie_card = GlassCard(
+            orientation="vertical",
+            padding=PAD, spacing=dp(10),
+            size_hint_y=None, height=dp(110),
+            bg=list(SURF), radius=RAD,
+        )
+        cookie_card.add_widget(lbl("Cookies (Instagram / Facebook / X)", 14, TEXT, bold=True, h=26))
+        cookie_card.add_widget(lbl(
+            "Some platforms require browser cookies for reliable downloads.",
+            10, TEXTSUB, h=22,
+        ))
+        cookie_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        import_cookie_btn = OutlineBtn(text="IMPORT COOKIE FILE", font_size=sp(11))
+        import_cookie_btn.bind(on_release=lambda *_: self._import_cookie_file())
+        cookie_info_btn = OutlineBtn(text="HOW TO GET COOKIES", font_size=sp(11))
+        cookie_info_btn.bind(on_release=lambda *_: self._show_cookie_help())
+        cookie_row.add_widget(import_cookie_btn)
+        cookie_row.add_widget(cookie_info_btn)
+        cookie_card.add_widget(cookie_row)
+        self._cookie_status_lbl = lbl("", 10, GREEN, h=20)
+        cookie_card.add_widget(self._cookie_status_lbl)
+        c.add_widget(cookie_card)
+
         diag_card = GlassCard(
             orientation="vertical",
             padding=PAD, spacing=dp(10),
@@ -3123,9 +3266,173 @@ class VideoDownloaderApp(App):
         try:
             text = Clipboard.paste()
             if text and text.strip():
-                self.url_in.text = text.strip()
+                text = text.strip()
+                # Check for multiple URLs
+                try:
+                    from batch_download import classify_urls
+                    info = classify_urls(text)
+                    if len(info["urls"]) > 1:
+                        self._show_batch_dialog(info)
+                        return
+                except Exception:
+                    pass
+                self.url_in.text = text
         except Exception as e:
             wlog(f"paste: {e}")
+
+    def _check_clipboard_on_startup(self):
+        """If clipboard contains a supported URL that isn't already in the
+        URL input, offer a quick 'Paste & Download' prompt."""
+        try:
+            text = Clipboard.paste()
+            if not text or not isinstance(text, str):
+                return
+            text = text.strip()
+            if not text.startswith("http"):
+                return
+            # Don't prompt if already filled
+            if self.url_in.text.strip() == text:
+                return
+            try:
+                from batch_download import classify_urls, is_supported_platform
+                info = classify_urls(text)
+                if info["supported"] > 0:
+                    self._show_clipboard_prompt(info)
+            except Exception:
+                pass
+        except Exception as e:
+            wlog(f"clip check: {e}")
+
+    def _show_clipboard_prompt(self, info):
+        """Offer a small popup suggesting the user paste the detected URL."""
+        try:
+            url = info["urls"][0]
+            platform = urlparse(url).netloc.split(".")[-2] if len(urlparse(url).netloc.split(".")) >= 2 else "unknown"
+            msg = f"[b]{platform.capitalize()}[/b] link detected in clipboard.\nPaste and fetch?"
+
+            box = BoxLayout(orientation="vertical", spacing=dp(12), padding=dp(18))
+            box.add_widget(Label(
+                text=msg, markup=True, color=list(TEXT),
+                font_size=sp(14), halign="center", valign="middle",
+                size_hint_y=None, height=dp(40),
+            ))
+            row = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(42))
+
+            def _do_paste(*_):
+                self.url_in.text = url
+                try:
+                    popup.dismiss()
+                except Exception:
+                    pass
+
+            def _nope(*_):
+                try:
+                    popup.dismiss()
+                except Exception:
+                    pass
+
+            dismiss_btn = OutlineBtn(
+                text="No, thanks", size_hint=(0.4, 1),
+                font_size=sp(12),
+            )
+            dismiss_btn.bind(on_release=_nope)
+            paste_btn = Btn(
+                text="Paste & Fetch", size_hint=(0.6, 1),
+                font_size=sp(12),
+            )
+            paste_btn.bind(on_release=lambda *_: (_do_paste(), self.do_fetch()))
+            row.add_widget(dismiss_btn)
+            row.add_widget(paste_btn)
+            box.add_widget(row)
+
+            popup = Popup(
+                title="Clipboard Link", title_color=list(TEXT),
+                title_size=sp(14),
+                content=box,
+                size_hint=(0.85, None), height=dp(150),
+                background_color=list(CARD),
+                separator_color=list(BORDER),
+            )
+            Clock.schedule_once(lambda dt: popup.open(), 0.5)
+        except Exception as e:
+            wlog(f"clip prompt: {e}")
+
+    def _show_batch_dialog(self, info):
+        """Show detected URLs from clipboard and let user pick which to download."""
+        urls = info["urls"]
+        from batch_download import is_supported_platform
+
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
+        box.add_widget(Label(
+            text=f"[b]{len(urls)} links[/b] detected in clipboard",
+            markup=True, color=list(TEXT),
+            font_size=sp(13), halign="center", size_hint_y=None, height=dp(22),
+        ))
+
+        # Scrollable URL list with checkboxes
+        from kivy.uix.gridlayout import GridLayout as Grid
+        from kivy.uix.togglebutton import ToggleButton
+        scroll = ScrollView(size_hint_y=1)
+        inner = BoxLayout(orientation="vertical", spacing=dp(4), size_hint_y=None)
+        inner.bind(minimum_height=inner.setter("height"))
+
+        checked = {i: True for i in range(len(urls))}
+
+        for i, url in enumerate(urls):
+            row = BoxLayout(orientation="horizontal", size_hint=(None, 1), width=self.root.width * 0.8)
+            tb = ToggleButton(
+                text="✓", size_hint=(None, 1), width=dp(32),
+                font_size=sp(14), state="down",
+                color=list(GREEN),
+            )
+            tb.bind(state=lambda t, idx=i: checked.update({idx: t.state == "down"}))
+            row.add_widget(tb)
+            lbl = Label(
+                text=url, font_size=sp(10), color=list(TEXTSUB),
+                halign="left", size_hint_x=1,
+            )
+            lbl.bind(size=lambda w, v: setattr(w, "text_size", (v[0], None)))
+            row.add_widget(lbl)
+            status = lbl("ok" if is_supported_platform(url) else "?", 9,
+                         GREEN if is_supported_platform(url) else YELLOW)
+            row.add_widget(status)
+            inner.add_widget(row)
+
+        scroll.add_widget(inner)
+        box.add_widget(scroll)
+
+        # Bottom buttons
+        row2 = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(42))
+
+        def _cancel(*_):
+            popup.dismiss()
+
+        def _paste_selected(*_):
+            selected = [urls[i] for i in range(len(urls)) if checked.get(i, False)]
+            if selected:
+                self.url_in.text = selected[0]
+                self._batch_urls = selected[1:]  # remaining for batch
+                if self._batch_urls:
+                    self._log(f"[color=00ccf2]Batch ready: {len(self._batch_urls) + 1} URLs queued[/color]")
+            popup.dismiss()
+
+        cancel_btn = OutlineBtn(text="Cancel", size_hint=(0.3, 1), font_size=sp(12))
+        cancel_btn.bind(on_release=_cancel)
+        paste_btn = Btn(text="Use Selected", size_hint=(0.7, 1), font_size=sp(12))
+        paste_btn.bind(on_release=_paste_selected)
+        row2.add_widget(cancel_btn)
+        row2.add_widget(paste_btn)
+        box.add_widget(row2)
+
+        popup = Popup(
+            title="Detected URLs", title_color=list(TEXT),
+            title_size=sp(14),
+            content=box,
+            size_hint=(0.9, 0.65),
+            background_color=list(CARD),
+            separator_color=list(BORDER),
+        )
+        popup.open()
 
     def do_fetch(self):
         if not downloader:
@@ -3564,6 +3871,9 @@ class VideoDownloaderApp(App):
             self._refresh_download_controls()
             self._stop_network_status_updates()
             self._release_active_locks()
+
+            # Check for remaining batch URLs
+            self._process_batch_queue()
         Clock.schedule_once(u)
 
     def _ce(self, msg):
@@ -3587,7 +3897,80 @@ class VideoDownloaderApp(App):
             self._refresh_download_controls()
             self._stop_network_status_updates()
             self._release_active_locks()
+
+            # Check for remaining batch URLs
+            self._process_batch_queue()
         Clock.schedule_once(u)
+
+    def _process_batch_queue(self):
+        """If there are remaining batch URLs, offer to download the next one."""
+        remaining = getattr(self, "_batch_urls", [])
+        if not remaining:
+            return
+        next_url = remaining[0]
+        self._batch_urls = remaining[1:]
+        cnt_left = len(self._batch_urls) + 1
+
+        try:
+            from batch_download import is_supported_platform
+            platform_tag = urlparse(next_url).netloc
+        except Exception:
+            is_supported_platform = lambda u: True
+            platform_tag = "unknown"
+
+        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
+        box.add_widget(Label(
+            text=f"[b]{len(remaining)}[/b] more URLs in queue\nDownload next?",
+            markup=True, color=list(TEXT),
+            font_size=sp(13), halign="center",
+            size_hint_y=None, height=dp(40),
+        ))
+        url_preview = next_url if len(next_url) <= 55 else next_url[:52] + "..."
+        box.add_widget(Label(
+            text=url_preview, font_size=sp(10), color=list(ACCENT2),
+            halign="left", size_hint_y=None, height=dp(20),
+        ))
+        box.add_widget(Label(
+            text="", size_hint_y=None, height=dp(6),
+        ))
+        row = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(42))
+
+        def _skip(*_):
+            popup.dismiss()
+            # Skip and check further
+            self._batch_urls = self._batch_urls  # already popped
+            self._process_batch_queue()
+
+        def _stop_batch(*_):
+            self._batch_urls = []
+            popup.dismiss()
+
+        def _download_next(*_):
+            popup.dismiss()
+            self.url_in.text = next_url
+            # Brief delay for UI to settle then auto-fetch
+            Clock.schedule_once(lambda dt: self.do_fetch(), 0.3)
+
+        skip_btn = OutlineBtn(text="Skip", size_hint=(0.25, 1), font_size=sp(12))
+        skip_btn.bind(on_release=_skip)
+        stop_btn = OutlineBtn(text="Stop", size_hint=(0.25, 1), font_size=sp(12), color=list(ROSE))
+        stop_btn.bind(on_release=_stop_batch)
+        next_btn = Btn(text="Next", size_hint=(0.5, 1), font_size=sp(12))
+        next_btn.bind(on_release=_download_next)
+        row.add_widget(skip_btn)
+        row.add_widget(stop_btn)
+        row.add_widget(next_btn)
+        box.add_widget(row)
+
+        popup = Popup(
+            title="Batch Download", title_color=list(TEXT),
+            title_size=sp(14),
+            content=box,
+            size_hint=(0.85, None), height=dp(180),
+            background_color=list(CARD),
+            separator_color=list(BORDER),
+        )
+        popup.open()
 
     # ── Visibility Helpers ────────────────────────────────────────────────
     def _show_prog(self):

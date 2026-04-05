@@ -79,17 +79,19 @@
 
 ```
 ytapp/
- main.py                      # App UI, theming, and lifecycle (~3600 lines)
+ main.py                      # App UI, theming, and lifecycle
  downloader.py                # YouTube downloader & pure-Python muxer
  downloader_platforms.py      # Multi-platform wrapper (Instagram, Facebook, etc.)
- api/                         # ✨ Modular platform API system
+ api/                         # Modular platform API system
     __init__.py               # Platform loader & registry
     base.py                   # Base config class
     instagram.py              # Instagram-specific config
     facebook.py               # Facebook-specific config
     tiktok.py                 # TikTok-specific config
-    ... (10+ platform files)  # Each platform in own file!
- platform_configs.py          # (Deprecated - use api/ instead)
+    ... (10+ platform files)  # Each platform in own file
+ ui/                          # Reusable UI widget library
+    __init__.py               # Widget exports
+    widgets.py                # Card, Btn, RingProgress, FmtChip, etc.
  app_settings.py              # Persistent settings, history, backup/restore
  buildozer.spec               # Android build configuration
  generate_icon.py             # Script to regenerate the app icon
@@ -98,6 +100,8 @@ ytapp/
     icon.png                  # 512x512 app icon
  xml/
     network_security_config.xml
+ LICENSE                      # MIT License
+ pyproject.toml               # Ruff lint config
  README.md
 ```
 
